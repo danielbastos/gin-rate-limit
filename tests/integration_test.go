@@ -97,6 +97,7 @@ func TestRedis(t *testing.T) {
 	t.Run("events", func(t *testing.T) { contract.RunEventStore(t, events) })
 	t.Run("buckets", func(t *testing.T) { contract.RunBucketStore(t, buckets) })
 	t.Run("limiters", func(t *testing.T) { contract.RunLimiters(t, events, buckets) })
+	t.Run("gin", func(t *testing.T) { contract.RunGinMiddleware(t, events, buckets) })
 	t.Run("shared_clients_and_private_prefix", func(t *testing.T) {
 		client, prefix := newRedis(t, addr)
 		second := redisclient.NewClient(&redisclient.Options{Addr: addr})
@@ -191,6 +192,7 @@ func TestPostgres(t *testing.T) {
 	t.Run("events", func(t *testing.T) { contract.RunEventStore(t, events) })
 	t.Run("buckets", func(t *testing.T) { contract.RunBucketStore(t, buckets) })
 	t.Run("limiters", func(t *testing.T) { contract.RunLimiters(t, events, buckets) })
+	t.Run("gin", func(t *testing.T) { contract.RunGinMiddleware(t, events, buckets) })
 	t.Run("schema_isolation_and_shared_pools", func(t *testing.T) {
 		pool, schema := newPostgres(t, dsn)
 		otherPool, otherSchema := newPostgres(t, dsn)

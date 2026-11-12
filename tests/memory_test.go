@@ -14,4 +14,5 @@ func TestMemory(t *testing.T) {
 	t.Run("events", func(t *testing.T) { contract.RunEventStore(t, events) })
 	t.Run("buckets", func(t *testing.T) { contract.RunBucketStore(t, buckets) })
 	t.Run("limiters", func(t *testing.T) { contract.RunLimiters(t, events, buckets) })
+	t.Run("gin", func(t *testing.T) { contract.RunGinMiddleware(t, events, buckets) })
 }

@@ -1,8 +1,8 @@
 # gin-rate-limit
 
 Biblioteca Go para contar ocorrências em janelas móveis, com Event Log e Time
-Buckets. A aplicação define limites, autorização e agendamento da limpeza.
-A biblioteca é independente de Gin.
+Buckets. O núcleo é independente de Gin; o pacote `gingatelimit` oferece um
+middleware opcional. A aplicação define políticas e agendamento da limpeza.
 
 Requer Go 1.26 ou superior.
 
@@ -43,6 +43,123 @@ Para usar buckets:
 ```go
 limiter, err := ratelimit.NewBuckets(memory.NewBucketStore(), time.Second)
 ```
+
+## Integração com Gin
+
+```go
+package main
+
+import (
+    "log"
+    "net/http"
+    "time"
+
+    ratelimit "github.com/danielbastos/gin-rate-limit"
+    "github.com/danielbastos/gin-rate-limit/gingatelimit"
+    "github.com/danielbastos/gin-rate-limit/storage/memory"
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    limiter, err := ratelimit.NewEventLog(memory.NewEventStore())
+    if err != nil { log.Fatal(err) }
+
+    middleware, err := gingatelimit.New(limiter, gingatelimit.Config{
+        Limit: 60,
+        Window: time.Minute,
+        KeyFunc: func(c *gin.Context) (ratelimit.Key, error) {
+            // FullPath usa o padrão registrado, como /users/:id.
+            return ratelimit.NewKey("http:"+c.Request.Method+":"+c.FullPath(),
+                "ip", c.ClientIP())
+        },
+    })
+    if err != nil { log.Fatal(err) }
+
+    router := gin.New()
+    router.Use(gin.Recovery())
+    // Sem proxy reverso. Atrás de um proxy, informe somente seus IPs/CIDRs.
+    if err := router.SetTrustedProxies(nil); err != nil { log.Fatal(err) }
+    router.POST("/login", middleware, func(c *gin.Context) {
+        c.Status(http.StatusNoContent)
+    })
+
+    api := router.Group("/api")
+    api.Use(middleware)
+    api.GET("/users/:id", func(c *gin.Context) {
+        c.Status(http.StatusNoContent)
+    })
+
+    log.Fatal(router.Run(":8080"))
+}
+```
+
+O middleware aceita tanto `NewEventLog` quanto `NewBuckets`, com Memory, Redis
+ou PostgreSQL. Memory compartilha contadores somente dentro do processo.
+Instâncias que usam o mesmo espaço no Redis ou PostgreSQL compartilham o histórico,
+mas a decisão de permitir continua não atômica.
+
+| Campo de `Config` | Comportamento |
+| --- | --- |
+| `Limit` | Máximo de ocorrências admitidas por janela; `int64` positivo obrigatório |
+| `Window` | Janela móvel positiva obrigatória |
+| `KeyFunc` | Função obrigatória que retorna uma `ratelimit.Key` válida ou erro |
+| `Skip` | Se retornar `true`, ignora geração de chave e armazenamento |
+| `OnLimit` | Substitui a resposta JSON padrão `429` |
+| `OnError` | Substitui a resposta padrão de erro; recebe o erro original encapsulado |
+| `FailOpen` | Por padrão `false`; se `true`, permite continuar após falha de `Get` ou `Hit` |
+
+O construtor retorna erros compatíveis com `errors.Is(err, gingatelimit.ErrInvalidConfig)`
+para limiter nulo (inclusive ponteiro nulo em interface), limite ou janela não
+positivos e `KeyFunc` ausente.
+
+1. O fluxo é `Skip` → `KeyFunc` → `Get` → decisão → `Hit` → próximo handler.
+2. Quando `count >= Limit`, responde `429 {"error":"rate limit exceeded"}` e
+   interrompe a cadeia. Requisições bloqueadas não registram ocorrência.
+3. O registro acontece antes do próximo handler e permanece mesmo se ele retornar
+   erro. A primeira versão não oferece contagem apenas de respostas malsucedidas.
+4. Erros de chave, incluindo uma `Key{}` sem erro, interrompem a cadeia com
+   `500 {"error":"rate limiter key error"}`, inclusive com `FailOpen` habilitado.
+5. Falhas de `Get` e `Hit` respondem `503 {"error":"rate limiter unavailable"}`
+   por padrão. `FailOpen` permite continuar sem garantia de contagem. Uma falha de
+   escrita remota pode ter resultado ambíguo; o middleware não repete a escrita.
+6. Todas as operações recebem `c.Request.Context()`. Falhas quando esse contexto
+   já está cancelado interrompem a cadeia mesmo com `FailOpen` habilitado.
+
+Erros são anexados a `c.Errors`, preservando `errors.Is`, inclusive quando
+`FailOpen` permite continuar; detalhes internos não aparecem nas respostas padrão.
+`OnError` só executa quando a requisição é interrompida por erro. Antes de chamar
+`OnLimit` ou `OnError`, o middleware já abortou a cadeia; o callback escreve a
+resposta personalizada. Os callbacks podem executar simultaneamente em requisições
+diferentes e devem proteger qualquer estado compartilhado.
+
+**Concorrência:** `Get` e `Hit` são separados. Requisições simultâneas podem observar
+o mesmo contador e ultrapassar o limite, inclusive entre várias instâncias usando
+Redis ou PostgreSQL. Esta integração não fornece limite estrito. Time Buckets
+também mantém sua contagem aproximada nas extremidades da janela.
+
+Use namespaces diferentes para políticas independentes. O exemplo cria uma
+política por método, padrão da rota e IP; um namespace fixo permite compartilhar
+o limite entre rotas. Para limitar por usuário, registre a autenticação antes do
+middleware e extraia a identidade autenticada em `KeyFunc`. O middleware não lê
+o body nem cria identidades automaticamente. Ao usar `ClientIP`, configure os
+[proxies confiáveis do Gin](https://gin-gonic.com/en/docs/server-config/trusted-proxies/)
+para que headers enviados pelo cliente não alterem a identidade usada no limite.
+
+Também é possível registrar globalmente com `router.Use(middleware)`. Nesse caso,
+requisições sem rota podem ter `FullPath()` vazio; defina a política desejada em
+`KeyFunc` ou `Skip`. Para ignorar health checks, por exemplo:
+
+```go
+Skip: func(c *gin.Context) bool { return c.Request.URL.Path == "/health" },
+```
+
+O middleware não inicia goroutines nem faz limpeza automática. Agende `Clean` na
+aplicação: retenha pelo menos a maior janela consultada no mesmo espaço de dados
+para Event Log e, para Buckets, essa janela **mais a resolução** para evitar que a
+limpeza pelo início dos buckets remova ocorrências ainda necessárias. O exemplo
+acima demonstra o registro HTTP; um serviço de longa duração precisa desse
+agendamento. Não são emitidos headers de saldo, reset ou `Retry-After`, pois a API
+atual não informa o instante exato em que haverá capacidade disponível.
 
 ## Contrato público
 
@@ -224,6 +341,14 @@ criam prefixos e schemas aleatórios e removem apenas seus próprios dados.
 `RATELIMIT_REQUIRE_INTEGRATION=1` impede que a ausência de configuração seja tratada
 como integração bem-sucedida. O CI executa os testes com Redis 8 e PostgreSQL 18.
 
+O CI roda na abertura de PRs e na atualização de suas branches, cancelando
+execuções anteriores da mesma PR. Os testes e `go vet` executam com Go 1.26.0
+e a versão estável mais recente; as integrações remotas usam uma única versão,
+definida em `go.mod`. Jobs adicionais verificam formatação, consistência de
+`go.mod`/`go.sum` com `go mod tidy -diff`, análise estática com Staticcheck e
+vulnerabilidades com govulncheck. As versões dessas duas ferramentas são fixadas
+no workflow.
+
 Benchmarks de Memory:
 
 ```sh
@@ -231,7 +356,9 @@ go test ./tests -run '^$' -bench BenchmarkMemory -benchmem
 ```
 
 A suíte reutilizável em `tests/contract` permite validar outros adapters com os
-mesmos cenários de eventos, buckets e estratégias públicas.
+mesmos cenários de eventos, buckets, estratégias públicas e middleware Gin.
+`RunGinMiddleware` verifica o fluxo HTTP e o compartilhamento sequencial de
+contadores entre routers, com isolamento por usuário e padrão de rota.
 
 Os resultados locais iniciais e suas condições estão em
 [`docs/benchmarks.md`](docs/benchmarks.md).
