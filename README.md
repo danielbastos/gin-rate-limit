@@ -341,6 +341,14 @@ criam prefixos e schemas aleatórios e removem apenas seus próprios dados.
 `RATELIMIT_REQUIRE_INTEGRATION=1` impede que a ausência de configuração seja tratada
 como integração bem-sucedida. O CI executa os testes com Redis 8 e PostgreSQL 18.
 
+O CI roda na abertura de PRs e na atualização de suas branches, cancelando
+execuções anteriores da mesma PR. Os testes e `go vet` executam com Go 1.26.0
+e a versão estável mais recente; as integrações remotas usam uma única versão,
+definida em `go.mod`. Jobs adicionais verificam formatação, consistência de
+`go.mod`/`go.sum` com `go mod tidy -diff`, análise estática com Staticcheck e
+vulnerabilidades com govulncheck. As versões dessas duas ferramentas são fixadas
+no workflow.
+
 Benchmarks de Memory:
 
 ```sh
