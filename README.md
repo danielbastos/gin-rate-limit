@@ -362,3 +362,7 @@ contadores entre routers, com isolamento por usuário e padrão de rota.
 
 Os resultados locais iniciais e suas condições estão em
 [`docs/benchmarks.md`](docs/benchmarks.md).
+
+## Licença
+
+Este projeto está disponível sob a [licença MIT](LICENSE).
